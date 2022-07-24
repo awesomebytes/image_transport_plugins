@@ -37,11 +37,14 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include "compressed_image_transport/qoixx.hpp"
 
 #include "compressed_image_transport/compression_common.h"
 
 #include <limits>
 #include <vector>
+
+#include <typeinfo>
 
 using namespace cv;
 
@@ -88,6 +91,7 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
 {
 
   cv_bridge::CvImagePtr cv_ptr(new cv_bridge::CvImage);
+  ROS_INFO_STREAM("Got compressed_subscriber::internal_callback");
 
   // Copy message header
   cv_ptr->header = message->header;
@@ -95,62 +99,101 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
   // Decode color/mono image
   try
   {
-    cv_ptr->image = cv::imdecode(cv::Mat(message->data), imdecode_flag_);
-
     // Assign image encoding string
     const size_t split_pos = message->format.find(';');
-    if (split_pos==std::string::npos)
+    std::string image_encoding = message->format.substr(0, split_pos);
+    std::string compression_format = message->format.substr(split_pos+2, 3);
+    ROS_INFO_STREAM("Compression is: '"<< compression_format << "'");
+    if (compression_format == "qoi")
     {
-      // Older version of compressed_image_transport does not signal image format
-      switch (cv_ptr->image.channels())
-      {
-        case 1:
-          cv_ptr->encoding = enc::MONO8;
-          break;
-        case 3:
-          cv_ptr->encoding = enc::BGR8;
-          break;
-        default:
-          ROS_ERROR("Unsupported number of channels: %i", cv_ptr->image.channels());
-          break;
-      }
-    } else
+      ROS_INFO_STREAM("Processing QOI!");
+      // returns std::pair<std::vector<std::byte>, qoixx::qoi::desc>
+      auto qoi_decoded = qoixx::qoi::decode<std::vector<uchar>>(message->data);
+      ROS_INFO_STREAM("Type of qoi_decoded: " << typeid(qoi_decoded).name());
+      // St4pairISt6vectorIhSaIhEEN5qoixx3qoi4descEE
+      ROS_INFO_STREAM("Type of qoi_decoded.first: " << typeid(qoi_decoded.first).name());
+      // St6vectorIhSaIhEE
+      ROS_INFO_STREAM("data size: " << qoi_decoded.first.size());
+
+      int channels = static_cast<int>(qoi_decoded.second.channels);
+      int width = qoi_decoded.second.width;
+      int height = qoi_decoded.second.height;
+      
+      // channels can only be 3 (or 4) in QOI
+      auto cv_type = CV_8UC3;
+      cv_ptr->encoding = enc::BGR8;
+
+      cv::Mat cv_img_from_qoi = cv::Mat(height,
+                              width,
+                              // TODO: is this correct for all cases? I think QOI deals only with srgb images
+                              cv_type,
+                              &qoi_decoded.first[0]);
+      ROS_INFO_STREAM("cv::Mat step: " << cv_img_from_qoi.step);
+      cv_ptr->image = cv_img_from_qoi;
+      ROS_INFO_STREAM("Decoded QOI image, cv_ptr->image.rows: "<< cv_ptr->image.rows << " cols: "<< cv_ptr->image.cols
+      << "qoi_decoded.second.height: " << qoi_decoded.second.height << " qoi_decoded.second.width: " <<
+      qoi_decoded.second.width << 
+      " qoi_desc channels: " << static_cast<int>(qoi_decoded.second.channels));
+
+      ROS_INFO_STREAM("total size of cv_img_from_qoi: "<< cv_ptr->image.rows * cv_ptr->image.cols * cv_ptr->image.channels());
+
+    }
+    else 
     {
-      std::string image_encoding = message->format.substr(0, split_pos);
 
-      cv_ptr->encoding = image_encoding;
+      cv_ptr->image = cv::imdecode(cv::Mat(message->data), imdecode_flag_);
 
-      if ( enc::isColor(image_encoding))
+      if (split_pos==std::string::npos)
       {
-        std::string compressed_encoding = message->format.substr(split_pos);
-        bool compressed_bgr_image = (compressed_encoding.find("compressed bgr") != std::string::npos);
-
-        // Revert color transformation
-        if (compressed_bgr_image)
+        // Older version of compressed_image_transport does not signal image format
+        switch (cv_ptr->image.channels())
         {
-          // if necessary convert colors from bgr to rgb
-          if ((image_encoding == enc::RGB8) || (image_encoding == enc::RGB16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2RGB);
-
-          if ((image_encoding == enc::RGBA8) || (image_encoding == enc::RGBA16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2RGBA);
-
-          if ((image_encoding == enc::BGRA8) || (image_encoding == enc::BGRA16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2BGRA);
+          case 1:
+            cv_ptr->encoding = enc::MONO8;
+            break;
+          case 3:
+            cv_ptr->encoding = enc::BGR8;
+            break;
+          default:
+            ROS_ERROR("Unsupported number of channels: %i", cv_ptr->image.channels());
+            break;
+        }
         } else
         {
-          // if necessary convert colors from rgb to bgr
-          if ((image_encoding == enc::BGR8) || (image_encoding == enc::BGR16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2BGR);
+          cv_ptr->encoding = image_encoding;
 
-          if ((image_encoding == enc::BGRA8) || (image_encoding == enc::BGRA16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2BGRA);
+          if ( enc::isColor(image_encoding))
+          {
+            std::string compressed_encoding = message->format.substr(split_pos);
+            bool compressed_bgr_image = (compressed_encoding.find("compressed bgr") != std::string::npos);
 
-          if ((image_encoding == enc::RGBA8) || (image_encoding == enc::RGBA16))
-            cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2RGBA);
+            // Revert color transformation
+            if (compressed_bgr_image)
+            {
+              // if necessary convert colors from bgr to rgb
+              if ((image_encoding == enc::RGB8) || (image_encoding == enc::RGB16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2RGB);
+
+              if ((image_encoding == enc::RGBA8) || (image_encoding == enc::RGBA16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2RGBA);
+
+              if ((image_encoding == enc::BGRA8) || (image_encoding == enc::BGRA16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_BGR2BGRA);
+            } else
+            {
+              // if necessary convert colors from rgb to bgr
+              if ((image_encoding == enc::BGR8) || (image_encoding == enc::BGR16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2BGR);
+
+              if ((image_encoding == enc::BGRA8) || (image_encoding == enc::BGRA16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2BGRA);
+
+              if ((image_encoding == enc::RGBA8) || (image_encoding == enc::RGBA16))
+                cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2RGBA);
+            }
+          }
         }
       }
-    }
   }
   catch (cv::Exception& e)
   {

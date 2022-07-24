@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(compressed_image_transport)
 
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 find_package(OpenCV REQUIRED)
 find_package(catkin REQUIRED COMPONENTS cv_bridge dynamic_reconfigure image_transport)
 
