@@ -37,7 +37,8 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
-#include "compressed_image_transport/qoixx.hpp"
+#include "compressed_image_transport/qoi.hpp"
+
 
 #include "compressed_image_transport/compression_common.h"
 
@@ -91,7 +92,6 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
 {
 
   cv_bridge::CvImagePtr cv_ptr(new cv_bridge::CvImage);
-  ROS_INFO_STREAM("Got compressed_subscriber::internal_callback");
 
   // Copy message header
   cv_ptr->header = message->header;
@@ -99,48 +99,35 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
   // Decode color/mono image
   try
   {
-    // Assign image encoding string
+    // Assign image encoding string and get compression format string
     const size_t split_pos = message->format.find(';');
     std::string image_encoding = message->format.substr(0, split_pos);
     std::string compression_format = message->format.substr(split_pos+2, 3);
-    ROS_INFO_STREAM("Compression is: '"<< compression_format << "'");
+    
     if (compression_format == "qoi")
     {
-      ROS_INFO_STREAM("Processing QOI!");
-      // returns std::pair<std::vector<std::byte>, qoixx::qoi::desc>
-      auto qoi_decoded = qoixx::qoi::decode<std::vector<uchar>>(message->data);
-      ROS_INFO_STREAM("Type of qoi_decoded: " << typeid(qoi_decoded).name());
-      // St4pairISt6vectorIhSaIhEEN5qoixx3qoi4descEE
-      ROS_INFO_STREAM("Type of qoi_decoded.first: " << typeid(qoi_decoded.first).name());
-      // St6vectorIhSaIhEE
-      ROS_INFO_STREAM("data size: " << qoi_decoded.first.size());
+      auto header = qoi::get_header(message->data);
+      auto img_pixels = qoi::decode(message->data);
 
-      int channels = static_cast<int>(qoi_decoded.second.channels);
-      int width = qoi_decoded.second.width;
-      int height = qoi_decoded.second.height;
+      // QOI can only do 3 or 4 channels (RGB/RGBA)
+      cv_ptr->encoding = enc::RGB8;
+      if (header.channels == 4)
+        cv_ptr->encoding = enc::RGBA8;
       
-      // channels can only be 3 (or 4) in QOI
-      auto cv_type = CV_8UC3;
-      cv_ptr->encoding = enc::BGR8;
+      // I need to make a copy or I get a black image
+      cv::Mat(header.height,
+              header.width,
+              cv_bridge::getCvType(cv_ptr->encoding),
+              &img_pixels[0]).copyTo(cv_ptr->image);
 
-      cv::Mat cv_img_from_qoi = cv::Mat(height,
-                              width,
-                              // TODO: is this correct for all cases? I think QOI deals only with srgb images
-                              cv_type,
-                              &qoi_decoded.first[0]);
-      ROS_INFO_STREAM("cv::Mat step: " << cv_img_from_qoi.step);
-      cv_ptr->image = cv_img_from_qoi;
-      ROS_INFO_STREAM("Decoded QOI image, cv_ptr->image.rows: "<< cv_ptr->image.rows << " cols: "<< cv_ptr->image.cols
-      << "qoi_decoded.second.height: " << qoi_decoded.second.height << " qoi_decoded.second.width: " <<
-      qoi_decoded.second.width << 
-      " qoi_desc channels: " << static_cast<int>(qoi_decoded.second.channels));
-
-      ROS_INFO_STREAM("total size of cv_img_from_qoi: "<< cv_ptr->image.rows * cv_ptr->image.cols * cv_ptr->image.channels());
-
+      // QOI uses RGB, transform to BGR
+      if (header.channels == 3)
+        cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGB2BGR);
+      if (header.channels == 4)
+        cv::cvtColor(cv_ptr->image, cv_ptr->image, CV_RGBA2BGRA);
     }
     else 
     {
-
       cv_ptr->image = cv::imdecode(cv::Mat(message->data), imdecode_flag_);
 
       if (split_pos==std::string::npos)
@@ -203,9 +190,10 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
   size_t rows = cv_ptr->image.rows;
   size_t cols = cv_ptr->image.cols;
 
-  if ((rows > 0) && (cols > 0))
+  if ((rows > 0) && (cols > 0)){
     // Publish message to user callback
     user_cb(cv_ptr->toImageMsg());
+  }
 }
 
 } //namespace compressed_image_transport
